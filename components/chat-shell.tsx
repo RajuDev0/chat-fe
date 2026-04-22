@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  ArrowDown,
   ArrowUp,
   FileBadge,
   FileText,
@@ -13,7 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { Button } from "@/components/ui/button";
@@ -24,6 +25,7 @@ type Attachment = {
   name: string;
   sizeLabel: string;
   kind: string;
+  file: File;
 };
 
 type Message = {
@@ -66,30 +68,6 @@ function formatBytes(size: number) {
   }
 
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function buildAssistantReply(message: string, attachments: Attachment[]) {
-  const normalized = message.trim();
-  const summary = normalized || "the uploaded files";
-
-  const fileBlock =
-    attachments.length > 0
-      ? `\n\n### Attachments\n${attachments
-          .map((file) => `- \`${file.name}\` (${file.sizeLabel})`)
-          .join("\n")}`
-      : "";
-
-  return [
-    `Hey! Here's a quick response for **${summary.slice(0, 160)}**.`,
-    "",
-    "### Next steps",
-    "- Refine the request with the exact output you want",
-    "- Add constraints like tone, format, or framework",
-    "- Use the attached files as context for the next turn",
-    fileBlock,
-  ]
-    .join("\n")
-    .trim();
 }
 
 function AttachmentChip({
@@ -175,6 +153,7 @@ function Composer({
       name: file.name,
       sizeLabel: formatBytes(file.size),
       kind: file.type || "file",
+      file,
     }));
 
     setAttachments((current) => {
@@ -299,15 +278,88 @@ export function ChatShell() {
   const { resolvedTheme, setTheme } = useTheme();
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatVersion, setChatVersion] = useState(0);
+  const [chatId, setChatId] = useState(() => crypto.randomUUID());
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
+  const shouldStickToBottomRef = useRef(true);
+  const previousMessageCountRef = useRef(0);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
 
   const hasMessages = messages.length > 0;
 
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  function syncBottomState(container: HTMLDivElement) {
+    const distanceFromBottom =
+      container.scrollHeight - (container.scrollTop + container.clientHeight);
+    const isNearBottom = distanceFromBottom < 120;
+    shouldStickToBottomRef.current = isNearBottom;
+    setShowScrollToBottom(!isNearBottom);
+  }
+
+  function scrollContainerToBottom(behavior: ScrollBehavior) {
+    const container = scrollContainerRef.current;
+    if (!container) {
+      return;
+    }
+
+    container.scrollTo({ top: container.scrollHeight, behavior });
+    syncBottomState(container);
+  }
+
+  useLayoutEffect(() => {
+    const hasNewMessage = messages.length > previousMessageCountRef.current;
+    previousMessageCountRef.current = messages.length;
+
+    if (!hasNewMessage && !shouldStickToBottomRef.current) {
+      return;
+    }
+
+    const firstBehavior: ScrollBehavior = hasNewMessage ? "smooth" : "auto";
+    scrollContainerToBottom(firstBehavior);
+
+    // Follow-up pass catches late content growth from rich markdown.
+    const timeoutId = window.setTimeout(() => {
+      scrollContainerToBottom("auto");
+    }, 140);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [messages]);
 
-  function submitMessage({ content, attachments }: ComposerSubmitPayload) {
+  async function callLegalAgent({
+    content,
+    attachments,
+  }: ComposerSubmitPayload) {
+    const formData = new FormData();
+    formData.append("mode", "contract_review");
+    formData.append("chat_id", chatId);
+    formData.append("language_family", "arabic");
+    formData.append("query", content || "Review this contract.");
+    formData.append("selected_models", "groq/gpt-oss:120b");
+
+    attachments.forEach((attachment) => {
+      formData.append("files", attachment.file);
+    });
+
+    const response = await fetch(
+      `${process.env.NEXT_PUBLIC_API_URL}/agent_rag/legal_agent`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
+        },
+        body: formData,
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Legal agent request failed with status ${response.status}`);
+    }
+
+    return (await response.json()) as { response?: string };
+  }
+
+  async function submitMessage({ content, attachments }: ComposerSubmitPayload) {
     const nextUserMessage: Message = {
       id: Date.now(),
       role: "user",
@@ -315,18 +367,50 @@ export function ChatShell() {
       attachments,
     };
 
+    const pendingAssistantId = Date.now() + 1;
     const assistantMessage: Message = {
-      id: Date.now() + 1,
+      id: pendingAssistantId,
       role: "assistant",
-      content: buildAssistantReply(content, attachments),
+      content: "Reviewing your request...",
     };
 
     setMessages((current) => [...current, nextUserMessage, assistantMessage]);
+
+    try {
+      const result = await callLegalAgent({ content, attachments });
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingAssistantId
+            ? {
+                ...message,
+                content: result.response?.trim() || "No response returned.",
+              }
+            : message
+        )
+      );
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "Failed to reach the legal agent.";
+
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingAssistantId
+            ? {
+                ...message,
+                content: errorMessage,
+              }
+            : message
+        )
+      );
+    }
   }
 
   function startNewChat() {
     setMessages([]);
     setChatVersion((current) => current + 1);
+    setChatId(crypto.randomUUID());
   }
 
   function handleThemeToggle() {
@@ -335,6 +419,12 @@ export function ChatShell() {
 
   function handleNewChat() {
     startNewChat();
+  }
+
+  function jumpToBottom() {
+    shouldStickToBottomRef.current = true;
+    setShowScrollToBottom(false);
+    scrollContainerToBottom("smooth");
   }
 
   return (
@@ -390,54 +480,74 @@ export function ChatShell() {
           </div>
         </main>
       ) : (
-        <main className="relative mx-auto flex min-h-screen w-full max-w-4xl flex-col px-4 pb-44 pt-24 sm:px-6">
-          <section className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8">
-            {messages.map((message) => {
-              const isUser = message.role === "user";
+        <main className="relative mx-auto h-screen w-full max-w-4xl px-4 pt-24 sm:px-6">
+          <div
+            ref={scrollContainerRef}
+            className="h-full overflow-y-auto pb-44"
+            onScroll={(event) => syncBottomState(event.currentTarget)}
+          >
+            <section className="mx-auto flex w-full max-w-3xl flex-col gap-8">
+              {messages.map((message) => {
+                const isUser = message.role === "user";
 
-              return (
-                <article
-                  key={message.id}
-                  className={`flex ${isUser ? "justify-end" : "justify-start"}`}
-                >
-                  <div
-                    className={`max-w-[85%] ${
-                      isUser
-                        ? "rounded-[20px] bg-primary px-4 py-3 text-primary-foreground"
-                        : "px-1 py-1 text-foreground"
-                    }`}
+                return (
+                  <article
+                    key={message.id}
+                    className={`flex ${isUser ? "justify-end" : "justify-start"}`}
                   >
-                    {message.attachments && message.attachments.length > 0 && (
-                      <div className={`mb-3 flex flex-wrap gap-2 ${isUser ? "" : "ml-0.5"}`}>
-                        {message.attachments.map((attachment) => (
-                          <div
-                            key={attachment.id}
-                            className={
-                              isUser
-                                ? "rounded-2xl bg-primary-foreground/10 text-primary-foreground"
-                                : ""
-                            }
-                          >
-                            <AttachmentChip attachment={attachment} />
-                          </div>
-                        ))}
-                      </div>
-                    )}
-
-                    <ChatMarkdown
-                      invert={isUser}
-                      className={isUser ? "text-[15px]" : "text-[17px]"}
+                    <div
+                      className={`max-w-[85%] ${
+                        isUser
+                          ? "rounded-[20px] bg-primary px-4 py-3 text-primary-foreground"
+                          : "px-1 py-1 text-foreground"
+                      }`}
                     >
-                      {message.content}
-                    </ChatMarkdown>
-                  </div>
-                </article>
-              );
-            })}
-            <div ref={endRef} />
-          </section>
+                      {message.attachments && message.attachments.length > 0 && (
+                        <div className={`mb-3 flex flex-wrap gap-2 ${isUser ? "" : "ml-0.5"}`}>
+                          {message.attachments.map((attachment) => (
+                            <div
+                              key={attachment.id}
+                              className={
+                                isUser
+                                  ? "rounded-2xl bg-primary-foreground/10 text-primary-foreground"
+                                  : ""
+                              }
+                            >
+                              <AttachmentChip attachment={attachment} />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <ChatMarkdown
+                        invert={isUser}
+                        className={isUser ? "text-[15px]" : "text-[17px]"}
+                      >
+                        {message.content}
+                      </ChatMarkdown>
+                    </div>
+                  </article>
+                );
+              })}
+              <div ref={endRef} />
+            </section>
+          </div>
 
           <div className="pointer-events-none fixed inset-x-0 bottom-0 h-36 bg-[linear-gradient(180deg,var(--composer-fade-start),var(--composer-fade-end)_42%,var(--app-bg))]" />
+          {showScrollToBottom && (
+            <div className="fixed bottom-28 right-4 z-20 sm:right-8">
+              <Button
+                type="button"
+                size="icon"
+                variant="outline"
+                className="h-9 w-9 rounded-full bg-card"
+                onClick={jumpToBottom}
+                aria-label="Scroll to latest message"
+              >
+                <ArrowDown className="h-4 w-4" />
+              </Button>
+            </div>
+          )}
           <div className="fixed inset-x-0 bottom-0 px-4 pb-5 sm:px-6">
             <div className="mx-auto w-full max-w-3xl">
               <Composer
