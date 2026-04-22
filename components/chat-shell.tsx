@@ -12,13 +12,12 @@ import {
   SunMedium,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useTheme } from "next-themes";
+import { useEffect, useRef, useState } from "react";
 
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-
-type Theme = "light" | "dark";
 
 type Attachment = {
   id: string;
@@ -100,22 +99,20 @@ function AttachmentChip({
   attachment: Attachment;
   onRemove?: (id: string) => void;
 }) {
-  const handleRemove = useCallback(() => {
+  function handleRemove() {
     onRemove?.(attachment.id);
-  }, [attachment.id, onRemove]);
+  }
 
   return (
-    <div className="inline-flex max-w-full items-center gap-2 rounded-2xl border border-[var(--border-soft)] bg-[var(--panel)] px-3 py-2 text-xs text-[var(--foreground)]">
+    <div className="inline-flex max-w-full items-center gap-2 rounded-2xl border border-border bg-card px-3 py-2 text-xs text-foreground">
       <AttachmentIcon name={attachment.name} />
       <span className="max-w-[280px] truncate">{attachment.name}</span>
-      <span className="shrink-0 text-[var(--muted-foreground)]">
-        {attachment.sizeLabel}
-      </span>
+      <span className="shrink-0 text-muted-foreground">{attachment.sizeLabel}</span>
       {onRemove ? (
         <button
           type="button"
           onClick={handleRemove}
-          className="cursor-pointer rounded-full p-0.5 text-[var(--muted-foreground)] transition hover:bg-[var(--panel-strong)] hover:text-[var(--foreground)]"
+          className="cursor-pointer rounded-full p-0.5 text-muted-foreground transition hover:bg-accent hover:text-accent-foreground"
           aria-label={`Remove ${attachment.name}`}
         >
           <X className="h-3.5 w-3.5" />
@@ -147,15 +144,15 @@ function Composer({
     textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
   }, [draft]);
 
-  const resetComposer = useCallback(() => {
+  function resetComposer() {
     setDraft("");
     setAttachments([]);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
-  }, []);
+  }
 
-  const submitMessage = useCallback(() => {
+  function submitMessage() {
     const content = draft.trim();
     if (!content && attachments.length === 0) {
       return;
@@ -166,9 +163,9 @@ function Composer({
       content,
     });
     resetComposer();
-  }, [attachments, draft, onSubmitMessage, resetComposer]);
+  }
 
-  const handleFilesSelected = useCallback((files: FileList | null) => {
+  function handleFilesSelected(files: FileList | null) {
     if (!files || files.length === 0) {
       return;
     }
@@ -195,47 +192,40 @@ function Composer({
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
-  }, []);
+  }
 
-  const removeAttachment = useCallback((id: string) => {
+  function removeAttachment(id: string) {
     setAttachments((current) => current.filter((item) => item.id !== id));
-  }, []);
+  }
 
-  const focusTextarea = useCallback(() => {
+  function focusTextarea() {
     textareaRef.current?.focus();
-  }, []);
+  }
 
-  const handleDraftChange = useCallback(
-    (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-      setDraft(event.target.value);
-    },
-    []
-  );
+  function handleDraftChange(event: React.ChangeEvent<HTMLTextAreaElement>) {
+    setDraft(event.target.value);
+  }
 
-  const handleTextareaKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        submitMessage();
-      }
-    },
-    [submitMessage]
-  );
+  function handleTextareaKeyDown(
+    event: React.KeyboardEvent<HTMLTextAreaElement>
+  ) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      submitMessage();
+    }
+  }
 
-  const handleFileInputChange = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      handleFilesSelected(event.target.files);
-    },
-    [handleFilesSelected]
-  );
+  function handleFileInputChange(event: React.ChangeEvent<HTMLInputElement>) {
+    handleFilesSelected(event.target.files);
+  }
 
-  const openFilePicker = useCallback(() => {
+  function openFilePicker() {
     fileInputRef.current?.click();
-  }, []);
+  }
 
-  const handleSubmitClick = useCallback(() => {
+  function handleSubmitClick() {
     submitMessage();
-  }, [submitMessage]);
+  }
 
   return (
     <div
@@ -262,7 +252,7 @@ function Composer({
       )}
 
       <div
-        className="cursor-text rounded-xl border border-[var(--border-strong)] bg-[var(--composer-surface)] p-3 shadow-sm"
+        className="cursor-text rounded-xl border border-border bg-card p-3 shadow-sm"
         onClick={focusTextarea}
       >
         <div className="relative cursor-text rounded-md bg-transparent px-1.5 pt-1.5">
@@ -272,7 +262,7 @@ function Composer({
             onChange={handleDraftChange}
             onKeyDown={handleTextareaKeyDown}
             placeholder={isDocked ? "Reply..." : "How can I help you today?"}
-            className="max-h-[220px] min-h-12 cursor-text rounded-none bg-transparent text-[15px] leading-6 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)]"
+            className="max-h-[220px] min-h-12 cursor-text rounded-none bg-transparent text-[15px] leading-6 text-foreground placeholder:text-muted-foreground"
           />
         </div>
 
@@ -306,17 +296,7 @@ function Composer({
 }
 
 export function ChatShell() {
-  const [theme, setTheme] = useState<Theme>(() => {
-    if (typeof document !== "undefined") {
-      if (document.documentElement.classList.contains("dark")) {
-        return "dark";
-      }
-
-      return "dark";
-    }
-
-    return "dark";
-  });
+  const { resolvedTheme, setTheme } = useTheme();
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatVersion, setChatVersion] = useState(0);
   const endRef = useRef<HTMLDivElement>(null);
@@ -324,15 +304,10 @@ export function ChatShell() {
   const hasMessages = messages.length > 0;
 
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-    window.localStorage.setItem("theme", theme);
-  }, [theme]);
-
-  useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages]);
 
-  const submitMessage = useCallback(({ content, attachments }: ComposerSubmitPayload) => {
+  function submitMessage({ content, attachments }: ComposerSubmitPayload) {
     const nextUserMessage: Message = {
       id: Date.now(),
       role: "user",
@@ -347,23 +322,23 @@ export function ChatShell() {
     };
 
     setMessages((current) => [...current, nextUserMessage, assistantMessage]);
-  }, []);
+  }
 
-  const startNewChat = useCallback(() => {
+  function startNewChat() {
     setMessages([]);
     setChatVersion((current) => current + 1);
-  }, []);
+  }
 
-  const handleThemeToggle = useCallback(() => {
-    setTheme((current) => (current === "light" ? "dark" : "light"));
-  }, []);
+  function handleThemeToggle() {
+    setTheme(resolvedTheme === "light" ? "dark" : "light");
+  }
 
-  const handleNewChat = useCallback(() => {
+  function handleNewChat() {
     startNewChat();
-  }, [startNewChat]);
+  }
 
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[var(--app-bg)] text-[var(--foreground)] transition-colors duration-300">
+    <div className="relative min-h-screen overflow-hidden bg-background text-foreground transition-colors duration-300">
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,_var(--hero-glow),_transparent_60%)]" />
 
       <div className="fixed right-4 top-4 z-20 flex items-center gap-2 sm:right-8 sm:top-6">
@@ -371,11 +346,11 @@ export function ChatShell() {
           type="button"
           size="icon"
           variant="outline"
-          className="h-9 w-9 rounded-full bg-[var(--panel)]"
+          className="h-9 w-9 rounded-full bg-card"
           onClick={handleThemeToggle}
           aria-label="Toggle theme"
         >
-          {theme === "light" ? (
+          {resolvedTheme === "light" ? (
             <MoonStar className="h-4 w-4" />
           ) : (
             <SunMedium className="h-4 w-4" />
@@ -386,7 +361,7 @@ export function ChatShell() {
           <Button
             type="button"
             variant="outline"
-            className="rounded-full bg-[var(--panel)] px-4"
+            className="rounded-full bg-card px-4"
             onClick={handleNewChat}
           >
             <MessageSquarePlus className="h-4 w-4" />
@@ -400,7 +375,7 @@ export function ChatShell() {
           <div className="w-full max-w-3xl">
             <div className="mb-7 flex flex-col items-center text-center">
               <div className="flex items-center gap-3">
-                <Sparkles className="h-8 w-8 text-[var(--primary)]" />
+                <Sparkles className="h-8 w-8 text-primary" />
                 <h1 className="font-serif text-4xl tracking-tight text-[var(--welcome-accent)] sm:text-6xl">
                   Back at it, Raju
                 </h1>
@@ -428,8 +403,8 @@ export function ChatShell() {
                   <div
                     className={`max-w-[85%] ${
                       isUser
-                        ? "rounded-[20px] bg-[var(--brand-strong)] px-4 py-3 text-[var(--brand-foreground)]"
-                        : "px-1 py-1 text-[var(--foreground)]"
+                        ? "rounded-[20px] bg-primary px-4 py-3 text-primary-foreground"
+                        : "px-1 py-1 text-foreground"
                     }`}
                   >
                     {message.attachments && message.attachments.length > 0 && (
@@ -437,7 +412,11 @@ export function ChatShell() {
                         {message.attachments.map((attachment) => (
                           <div
                             key={attachment.id}
-                            className={isUser ? "rounded-2xl bg-white/12 text-white" : ""}
+                            className={
+                              isUser
+                                ? "rounded-2xl bg-primary-foreground/10 text-primary-foreground"
+                                : ""
+                            }
                           >
                             <AttachmentChip attachment={attachment} />
                           </div>
