@@ -16,6 +16,7 @@ import {
 import { useTheme } from "next-themes";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+import { AgentLoader } from "@/components/agent-loader";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -33,11 +34,31 @@ type Message = {
   role: "assistant" | "user";
   content: string;
   attachments?: Attachment[];
+  activity?: StreamActivity | null;
+  streaming?: boolean;
 };
 
 type ComposerSubmitPayload = {
   attachments: Attachment[];
   content: string;
+};
+
+type LegalAgentRequestPayload = ComposerSubmitPayload & {
+  pendingAssistantId: number;
+};
+
+type StreamActivity = {
+  type:
+    | "file_parse"
+    | "status"
+    | "tool_call"
+    | "tool_start"
+    | "tool_end"
+    | "assistant_start"
+    | "assistant_done"
+    | "error";
+  title: string;
+  description?: string;
 };
 
 function getFileExtension(name: string) {
@@ -96,6 +117,29 @@ function AttachmentChip({
           <X className="h-3.5 w-3.5" />
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function AssistantThinkingLine({
+  activity,
+}: {
+  activity?: StreamActivity | null;
+}) {
+  const label = activity?.title || "Agent is thinking...";
+
+  return (
+    <div className="mt-3 flex items-center gap-3 px-1 py-1">
+      <span className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-border bg-background text-foreground shadow-sm">
+        <AgentLoader
+          type="sparkle"
+          className="scale-[0.82]"
+          dotClassName="bg-current"
+        />
+      </span>
+      <div className="min-w-0 truncate text-[13px] font-medium text-foreground">
+        {label}
+      </div>
     </div>
   );
 }
@@ -329,7 +373,15 @@ export function ChatShell() {
   async function callLegalAgent({
     content,
     attachments,
-  }: ComposerSubmitPayload) {
+    pendingAssistantId,
+  }: LegalAgentRequestPayload) {
+    console.info("[legal-agent] submitting request", {
+      chatId,
+      attachmentCount: attachments.length,
+      attachmentNames: attachments.map((attachment) => attachment.name),
+      hasContent: Boolean(content.trim()),
+    });
+
     const formData = new FormData();
     formData.append("mode", "contract_review");
     formData.append("chat_id", chatId);
@@ -342,7 +394,7 @@ export function ChatShell() {
     });
 
     const response = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL}/agent_rag/legal_agent`,
+      `${process.env.NEXT_PUBLIC_API_URL}/agent_rag/legal_agent/stream`,
       {
         method: "POST",
         headers: {
@@ -353,17 +405,187 @@ export function ChatShell() {
     );
 
     if (!response.ok) {
+      console.error("[legal-agent] request failed", {
+        status: response.status,
+        chatId,
+        attachmentCount: attachments.length,
+      });
       throw new Error(`Legal agent request failed with status ${response.status}`);
     }
 
-    return (await response.json()) as { response?: string };
+    console.info("[legal-agent] response received", {
+      chatId,
+      status: response.status,
+      attachmentCount: attachments.length,
+    });
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!response.body || !contentType.includes("application/x-ndjson")) {
+      return (await response.json()) as { response?: string };
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let assistantContent = "";
+
+    function setActivity(activity: StreamActivity | null) {
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id !== pendingAssistantId) {
+            return message;
+          }
+
+          return {
+            ...message,
+            activity,
+          };
+        })
+      );
+    }
+
+    function updateAssistant(
+      updater: (message: Message) => Message
+    ) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingAssistantId ? updater(message) : message
+        )
+      );
+    }
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+
+          let event: { type?: string; [key: string]: any };
+          try {
+            event = JSON.parse(trimmed);
+          } catch {
+            continue;
+          }
+
+          if (event.type === "status" || event.type === "file_parse") {
+            setActivity({
+              type: event.type,
+              title: String(event.message || event.stage || "Agent is thinking..."),
+              description:
+                event.stage && event.stage !== "prompt"
+                  ? String(event.stage)
+                  : undefined,
+            });
+            continue;
+          }
+
+          if (
+            event.type === "tool_start" ||
+            event.type === "tool_end" ||
+            event.type === "tool_call"
+          ) {
+            const toolTitle =
+              event.type === "tool_call" && event.phase === "end"
+                ? `Tool result: ${event.tool || "unknown"}`
+                : event.type === "tool_end"
+                  ? `Tool result: ${event.tool || "unknown"}`
+                  : `Tool call: ${event.tool || "unknown"}`;
+
+            setActivity({
+              type: event.type === "tool_call" ? "tool_start" : event.type,
+              title: toolTitle,
+              description: event.input || event.output || undefined,
+            });
+            continue;
+          }
+
+          if (event.type === "assistant_start" || event.type === "assistant_done") {
+            setActivity({
+              type: event.type,
+              title: String(event.message || "Agent is thinking..."),
+              description: event.stage ? String(event.stage) : undefined,
+            });
+            continue;
+          }
+
+          if (event.type === "assistant_delta") {
+            setActivity(null);
+            assistantContent += String(event.content || "");
+            updateAssistant((message) => ({
+              ...message,
+              content: assistantContent,
+            }));
+            continue;
+          }
+
+          if (event.type === "final") {
+            setActivity(null);
+            assistantContent = String(event.response || assistantContent || "");
+            updateAssistant((message) => ({
+              ...message,
+              content: assistantContent || "No response returned.",
+              streaming: false,
+            }));
+            continue;
+          }
+
+          if (event.type === "error") {
+            setActivity({
+              type: "error",
+              title: "Stream error",
+              description: String(event.message || "Unknown error"),
+            });
+            assistantContent = String(event.message || "Failed to reach the legal agent.");
+            updateAssistant((message) => ({
+              ...message,
+              content: assistantContent,
+              streaming: false,
+            }));
+          }
+        }
+      }
+
+      const trailing = buffer.trim();
+      if (trailing) {
+        try {
+          const event = JSON.parse(trailing);
+          if (event.type === "final") {
+            setActivity(null);
+            assistantContent = String(event.response || assistantContent || "");
+            updateAssistant((message) => ({
+              ...message,
+              content: assistantContent || "No response returned.",
+              streaming: false,
+            }));
+          }
+        } catch {
+          // Ignore partial trailing data.
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return { response: assistantContent };
   }
 
   async function submitMessage({ content, attachments }: ComposerSubmitPayload) {
     const nextUserMessage: Message = {
       id: Date.now(),
       role: "user",
-      content: content || "Attached files for review.",
+      content: content || "Attached files.",
       attachments,
     };
 
@@ -371,19 +593,26 @@ export function ChatShell() {
     const assistantMessage: Message = {
       id: pendingAssistantId,
       role: "assistant",
-      content: "Reviewing your request...",
+      content: "",
+      activity: null,
+      streaming: true,
     };
 
     setMessages((current) => [...current, nextUserMessage, assistantMessage]);
 
     try {
-      const result = await callLegalAgent({ content, attachments });
+      const result = await callLegalAgent({
+        content,
+        attachments,
+        pendingAssistantId,
+      });
       setMessages((current) =>
         current.map((message) =>
           message.id === pendingAssistantId
             ? {
                 ...message,
                 content: result.response?.trim() || "No response returned.",
+                streaming: false,
               }
             : message
         )
@@ -400,6 +629,7 @@ export function ChatShell() {
             ? {
                 ...message,
                 content: errorMessage,
+                streaming: false,
               }
             : message
         )
@@ -483,12 +713,13 @@ export function ChatShell() {
         <main className="relative mx-auto h-screen w-full max-w-4xl px-4 pt-24 sm:px-6">
           <div
             ref={scrollContainerRef}
-            className="h-full overflow-y-auto pb-44"
+            className="chat-scrollbar h-full overflow-y-auto pb-44 pr-1"
             onScroll={(event) => syncBottomState(event.currentTarget)}
           >
             <section className="mx-auto flex w-full max-w-3xl flex-col gap-8">
               {messages.map((message) => {
                 const isUser = message.role === "user";
+                const isThinking = !isUser && message.streaming && !message.content.trim();
 
                 return (
                   <article
@@ -519,12 +750,17 @@ export function ChatShell() {
                         </div>
                       )}
 
-                      <ChatMarkdown
-                        invert={isUser}
-                        className={isUser ? "text-[15px]" : "text-[17px]"}
-                      >
-                        {message.content}
-                      </ChatMarkdown>
+                      {isThinking ? (
+                        <AssistantThinkingLine activity={message.activity} />
+                      ) : (
+                        <ChatMarkdown
+                          invert={isUser}
+                          isAnimating={Boolean(message.streaming && !isUser)}
+                          className={isUser ? "text-[15px]" : "text-[17px]"}
+                        >
+                          {message.content}
+                        </ChatMarkdown>
+                      )}
                     </div>
                   </article>
                 );

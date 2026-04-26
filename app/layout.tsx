@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import "streamdown/styles.css";
 
 import { ThemeProvider } from "@/components/theme-provider";
 import "./globals.css";
