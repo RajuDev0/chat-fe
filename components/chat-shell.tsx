@@ -49,13 +49,13 @@ type LegalAgentRequestPayload = ComposerSubmitPayload & {
 
 type StreamActivity = {
   type:
-    | "file_parse"
     | "status"
-    | "tool_call"
+    | "uploading_files"
+    | "files_ready"
+    | "review_ready"
+    | "review_started"
     | "tool_start"
     | "tool_end"
-    | "assistant_start"
-    | "assistant_done"
     | "error";
   title: string;
   description?: string;
@@ -89,6 +89,28 @@ function formatBytes(size: number) {
   }
 
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getEventText(event: Record<string, unknown>) {
+  const value =
+    event.response ??
+    event.final_answer ??
+    event.content ??
+    event.output ??
+    event.message;
+
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  if (event.output && typeof event.output === "string") {
+    const match = event.output.match(/content='([^']*)'/);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  return value;
 }
 
 function AttachmentChip({
@@ -428,6 +450,7 @@ export function ChatShell() {
     const decoder = new TextDecoder();
     let buffer = "";
     let assistantContent = "";
+    let completionContent = "";
 
     function setActivity(activity: StreamActivity | null) {
       setMessages((current) =>
@@ -472,55 +495,64 @@ export function ChatShell() {
             continue;
           }
 
-          let event: { type?: string; [key: string]: any };
+          let event: Record<string, unknown> & { type?: string };
           try {
             event = JSON.parse(trimmed);
           } catch {
             continue;
           }
 
-          if (event.type === "status" || event.type === "file_parse") {
+          if (
+            event.type === "status" ||
+            event.type === "uploading_files" ||
+            event.type === "files_ready" ||
+            event.type === "review_ready" ||
+            event.type === "review_started"
+          ) {
+            if (
+              event.type === "status" &&
+              typeof event.stage === "string" &&
+              event.stage === "complete"
+            ) {
+              const structuredOutput = getEventText(event);
+              if (structuredOutput) {
+                completionContent = structuredOutput;
+              }
+            }
+
             setActivity({
-              type: event.type,
-              title: String(event.message || event.stage || "Agent is thinking..."),
+              type: "status",
+              title: String(
+                event.message || event.stage || "Agent is thinking..."
+              ),
               description:
-                event.stage && event.stage !== "prompt"
-                  ? String(event.stage)
+                typeof event.stage === "string" && event.stage !== "prompt"
+                  ? event.stage
                   : undefined,
             });
             continue;
           }
 
-          if (
-            event.type === "tool_start" ||
-            event.type === "tool_end" ||
-            event.type === "tool_call"
-          ) {
-            const toolTitle =
-              event.type === "tool_call" && event.phase === "end"
-                ? `Tool result: ${event.tool || "unknown"}`
-                : event.type === "tool_end"
-                  ? `Tool result: ${event.tool || "unknown"}`
-                  : `Tool call: ${event.tool || "unknown"}`;
-
+          if (event.type === "tool") {
+            const phase = event.phase === "end" ? "end" : "start";
+            const toolName = String(event.tool || "unknown");
             setActivity({
-              type: event.type === "tool_call" ? "tool_start" : event.type,
-              title: toolTitle,
-              description: event.input || event.output || undefined,
+              type: phase === "end" ? "tool_end" : "tool_start",
+              title:
+                phase === "end"
+                  ? `Tool result: ${toolName}`
+                  : `Tool call: ${toolName}`,
+              description:
+                typeof event.input === "string"
+                  ? event.input
+                  : typeof event.output === "string"
+                    ? event.output
+                    : undefined,
             });
             continue;
           }
 
-          if (event.type === "assistant_start" || event.type === "assistant_done") {
-            setActivity({
-              type: event.type,
-              title: String(event.message || "Agent is thinking..."),
-              description: event.stage ? String(event.stage) : undefined,
-            });
-            continue;
-          }
-
-          if (event.type === "assistant_delta") {
+          if (event.type === "delta") {
             setActivity(null);
             assistantContent += String(event.content || "");
             updateAssistant((message) => ({
@@ -530,9 +562,21 @@ export function ChatShell() {
             continue;
           }
 
-          if (event.type === "final") {
+          if (
+            event.type === "final_answer" ||
+            event.type === "final"
+          ) {
             setActivity(null);
-            assistantContent = String(event.response || assistantContent || "");
+            const finalText = getEventText(event);
+            const preferredFinalText =
+              completionContent.trim() ||
+              assistantContent.trim() ||
+              finalText;
+            if (!assistantContent.trim()) {
+              assistantContent = preferredFinalText;
+            } else if (completionContent.trim()) {
+              assistantContent = completionContent;
+            }
             updateAssistant((message) => ({
               ...message,
               content: assistantContent || "No response returned.",
@@ -545,9 +589,15 @@ export function ChatShell() {
             setActivity({
               type: "error",
               title: "Stream error",
-              description: String(event.message || "Unknown error"),
+              description:
+                typeof event.message === "string"
+                  ? event.message
+                  : "Unknown error",
             });
-            assistantContent = String(event.message || "Failed to reach the legal agent.");
+            assistantContent =
+              typeof event.message === "string"
+                ? event.message
+                : "Failed to reach the legal agent.";
             updateAssistant((message) => ({
               ...message,
               content: assistantContent,
@@ -561,9 +611,18 @@ export function ChatShell() {
       if (trailing) {
         try {
           const event = JSON.parse(trailing);
-          if (event.type === "final") {
+          if (event.type === "final_answer" || event.type === "final") {
             setActivity(null);
-            assistantContent = String(event.response || assistantContent || "");
+            const finalText = getEventText(event);
+            const preferredFinalText =
+              completionContent.trim() ||
+              assistantContent.trim() ||
+              finalText;
+            if (!assistantContent.trim()) {
+              assistantContent = preferredFinalText;
+            } else if (completionContent.trim()) {
+              assistantContent = completionContent;
+            }
             updateAssistant((message) => ({
               ...message,
               content: assistantContent || "No response returned.",
