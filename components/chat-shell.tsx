@@ -30,7 +30,7 @@ type Attachment = {
 };
 
 type Message = {
-  id: number;
+  id: string;
   role: "assistant" | "user";
   content: string;
   attachments?: Attachment[];
@@ -44,7 +44,7 @@ type ComposerSubmitPayload = {
 };
 
 type LegalAgentRequestPayload = ComposerSubmitPayload & {
-  pendingAssistantId: number;
+  pendingAssistantId: string;
 };
 
 type StreamActivity = {
@@ -111,6 +111,10 @@ function getEventText(event: Record<string, unknown>) {
   }
 
   return value;
+}
+
+function normalizeStreamText(value: string) {
+  return value.replace(/<\|nl\|>/g, "\n");
 }
 
 function AttachmentChip({
@@ -350,6 +354,7 @@ export function ChatShell() {
   const shouldStickToBottomRef = useRef(true);
   const previousMessageCountRef = useRef(0);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const activeRequestAbortRef = useRef<AbortController | null>(null);
 
   const hasMessages = messages.length > 0;
 
@@ -415,16 +420,41 @@ export function ChatShell() {
       formData.append("files", attachment.file);
     });
 
-    const response = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL}/agent_rag/legal_agent/stream`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
-        },
-        body: formData,
-      }
-    );
+    activeRequestAbortRef.current?.abort();
+    const abortController = new AbortController();
+    activeRequestAbortRef.current = abortController;
+
+    function finalizeAssistantMessage(content: string) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingAssistantId
+            ? {
+                ...message,
+                content,
+                streaming: false,
+              }
+            : message
+        )
+      );
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/agent_rag/legal_agent/stream`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
+          },
+          body: formData,
+          signal: abortController.signal,
+        }
+      );
+    } catch (error) {
+      activeRequestAbortRef.current = null;
+      throw error;
+    }
 
     if (!response.ok) {
       console.error("[legal-agent] request failed", {
@@ -432,6 +462,7 @@ export function ChatShell() {
         chatId,
         attachmentCount: attachments.length,
       });
+      activeRequestAbortRef.current = null;
       throw new Error(`Legal agent request failed with status ${response.status}`);
     }
 
@@ -443,14 +474,16 @@ export function ChatShell() {
 
     const contentType = response.headers.get("content-type") || "";
     if (!response.body || !contentType.includes("application/x-ndjson")) {
-      return (await response.json()) as { response?: string };
+      const json = (await response.json()) as { response?: string };
+      finalizeAssistantMessage(json.response?.trim() || "No response returned.");
+      activeRequestAbortRef.current = null;
+      return json;
     }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
     let assistantContent = "";
-    let completionContent = "";
 
     function setActivity(activity: StreamActivity | null) {
       setMessages((current) =>
@@ -509,17 +542,6 @@ export function ChatShell() {
             event.type === "review_ready" ||
             event.type === "review_started"
           ) {
-            if (
-              event.type === "status" &&
-              typeof event.stage === "string" &&
-              event.stage === "complete"
-            ) {
-              const structuredOutput = getEventText(event);
-              if (structuredOutput) {
-                completionContent = structuredOutput;
-              }
-            }
-
             setActivity({
               type: "status",
               title: String(
@@ -554,7 +576,7 @@ export function ChatShell() {
 
           if (event.type === "delta") {
             setActivity(null);
-            assistantContent += String(event.content || "");
+            assistantContent += normalizeStreamText(String(event.content || ""));
             updateAssistant((message) => ({
               ...message,
               content: assistantContent,
@@ -569,14 +591,9 @@ export function ChatShell() {
             setActivity(null);
             const finalText = getEventText(event);
             const preferredFinalText =
-              completionContent.trim() ||
-              assistantContent.trim() ||
-              finalText;
-            if (!assistantContent.trim()) {
-              assistantContent = preferredFinalText;
-            } else if (completionContent.trim()) {
-              assistantContent = completionContent;
-            }
+              normalizeStreamText(finalText).trim() ||
+              assistantContent.trim();
+            assistantContent = preferredFinalText;
             updateAssistant((message) => ({
               ...message,
               content: assistantContent || "No response returned.",
@@ -615,14 +632,9 @@ export function ChatShell() {
             setActivity(null);
             const finalText = getEventText(event);
             const preferredFinalText =
-              completionContent.trim() ||
-              assistantContent.trim() ||
-              finalText;
-            if (!assistantContent.trim()) {
-              assistantContent = preferredFinalText;
-            } else if (completionContent.trim()) {
-              assistantContent = completionContent;
-            }
+              normalizeStreamText(finalText).trim() ||
+              assistantContent.trim();
+            assistantContent = preferredFinalText;
             updateAssistant((message) => ({
               ...message,
               content: assistantContent || "No response returned.",
@@ -635,6 +647,9 @@ export function ChatShell() {
       }
     } finally {
       reader.releaseLock();
+      if (activeRequestAbortRef.current === abortController) {
+        activeRequestAbortRef.current = null;
+      }
     }
 
     return { response: assistantContent };
@@ -642,13 +657,13 @@ export function ChatShell() {
 
   async function submitMessage({ content, attachments }: ComposerSubmitPayload) {
     const nextUserMessage: Message = {
-      id: Date.now(),
+      id: crypto.randomUUID(),
       role: "user",
       content: content || "Attached files.",
       attachments,
     };
 
-    const pendingAssistantId = Date.now() + 1;
+    const pendingAssistantId = crypto.randomUUID();
     const assistantMessage: Message = {
       id: pendingAssistantId,
       role: "assistant",
@@ -665,22 +680,28 @@ export function ChatShell() {
         attachments,
         pendingAssistantId,
       });
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === pendingAssistantId
-            ? {
-                ...message,
-                content: result.response?.trim() || "No response returned.",
-                streaming: false,
-              }
-            : message
-        )
-      );
+      if (!result.response?.trim()) {
+        setMessages((current) =>
+          current.map((message) =>
+            message.id === pendingAssistantId
+              ? {
+                  ...message,
+                  content: "No response returned.",
+                  streaming: false,
+                }
+              : message
+          )
+        );
+      }
     } catch (error) {
       const errorMessage =
         error instanceof Error
           ? error.message
           : "Failed to reach the legal agent.";
+
+      if (error instanceof DOMException && error.name === "AbortError") {
+        return;
+      }
 
       setMessages((current) =>
         current.map((message) =>
@@ -697,6 +718,7 @@ export function ChatShell() {
   }
 
   function startNewChat() {
+    activeRequestAbortRef.current?.abort();
     setMessages([]);
     setChatVersion((current) => current + 1);
     setChatId(crypto.randomUUID());

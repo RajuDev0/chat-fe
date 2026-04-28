@@ -16,17 +16,67 @@ type ChatMarkdownProps = {
   isAnimating?: boolean;
 };
 
-function normalizeMarkdown(value: string, isAnimating: boolean) {
-  if (isAnimating) {
-    return value;
-  }
+function normalizeMarkdown(value: string, _isAnimating: boolean) {
+  const sectionTitles = [
+    "Executive Summary",
+    "Risks",
+    "Gaps",
+    "Conflicts",
+    "Recommended Next Steps",
+  ];
 
-  return value
-    .trim()
+  let content = value
     .replace(/\r\n/g, "\n")
+    .replace(/\\n/g, "\n")
     .replace(/\\\[/g, "$$")
     .replace(/\\\]/g, "$$")
-    .replace(/\n{3,}/g, "\n\n");
+    .replace(/\u202f/g, " ")
+    .replace(/\u00a0/g, " ")
+    .replace(/([a-zA-Z])(\d)/g, "$1 $2")
+    .replace(/(\d)([a-zA-Z])/g, "$1 $2")
+    .trim();
+
+  for (const title of sectionTitles) {
+    const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    content = content
+      .replace(
+        new RegExp(`(^|\\n)\\s*#{1,6}\\s*${escapedTitle}\\s*`, "g"),
+        `\n\n## ${title}\n\n`
+      )
+      .replace(
+        new RegExp(`([^#\\n])\\s*#{1,6}\\s*${escapedTitle}\\s*`, "g"),
+        `$1\n\n## ${title}\n\n`
+      )
+      .replace(
+        new RegExp(`(^|\\n)\\s*${escapedTitle}(?=[A-Z“"‘'\`-])`, "g"),
+        `\n\n## ${title}\n\n`
+      )
+      .replace(
+        new RegExp(`([^#\\s\\n])\\s*${escapedTitle}\\s*-\\s*`, "g"),
+        `$1\n\n## ${title}\n\n- `
+      )
+      .replace(
+        new RegExp(`^${escapedTitle}\\s*-\\s*`, "g"),
+        `## ${title}\n\n- `
+      );
+  }
+
+  content = content
+    .replace(/([.!?])\s*-\s*/g, "$1\n- ")
+    .replace(/\s-\s+(?=[A-Z*])/g, "\n- ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  for (const title of sectionTitles) {
+    const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const titlePattern = new RegExp(
+      `(^|\\n)\\s*\\*\\*?${escapedTitle}\\*\\*?\\s*-\\s*`,
+      "g"
+    );
+    content = content.replace(titlePattern, `$1## ${title}\n\n- `);
+  }
+
+  return content.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 export function ChatMarkdown({
@@ -40,7 +90,7 @@ export function ChatMarkdown({
   return (
     <div
       className={cn(
-        "chat-markdown whitespace-normal",
+        "chat-markdown break-words",
         invert && "chat-markdown-invert",
         className
       )}
@@ -52,7 +102,7 @@ export function ChatMarkdown({
           h1: ({ className: headingClassName, ...props }) => (
             <h1
               className={cn(
-                "mb-4 scroll-m-20 text-4xl font-extrabold tracking-tight last:mb-0",
+                "mb-1.5 scroll-m-20 text-4xl font-extrabold tracking-tight last:mb-0",
                 headingClassName
               )}
               {...props}
@@ -61,7 +111,7 @@ export function ChatMarkdown({
           h2: ({ className: headingClassName, ...props }) => (
             <h2
               className={cn(
-                "mt-5 mb-3 scroll-m-20 text-3xl font-semibold tracking-tight first:mt-0 last:mb-0",
+                "mt-4 mb-2 scroll-m-20 text-2xl font-semibold tracking-tight first:mt-0 last:mb-0",
                 headingClassName
               )}
               {...props}
@@ -70,7 +120,7 @@ export function ChatMarkdown({
           h3: ({ className: headingClassName, ...props }) => (
             <h3
               className={cn(
-                "mt-4 mb-2 scroll-m-20 text-2xl font-semibold tracking-tight first:mt-0 last:mb-0",
+                "mt-2 mb-1 scroll-m-20 text-2xl font-semibold tracking-tight first:mt-0 last:mb-0",
                 headingClassName
               )}
               {...props}
@@ -79,7 +129,7 @@ export function ChatMarkdown({
           h4: ({ className: headingClassName, ...props }) => (
             <h4
               className={cn(
-                "mt-4 mb-2 scroll-m-20 text-xl font-semibold tracking-tight first:mt-0 last:mb-0",
+                "mt-2 mb-1 scroll-m-20 text-xl font-semibold tracking-tight first:mt-0 last:mb-0",
                 headingClassName
               )}
               {...props}
@@ -88,7 +138,7 @@ export function ChatMarkdown({
           h5: ({ className: headingClassName, ...props }) => (
             <h5
               className={cn(
-                "my-3 text-lg font-semibold first:mt-0 last:mb-0",
+                "my-1.5 text-lg font-semibold first:mt-0 last:mb-0",
                 headingClassName
               )}
               {...props}
@@ -96,14 +146,14 @@ export function ChatMarkdown({
           ),
           h6: ({ className: headingClassName, ...props }) => (
             <h6
-              className={cn("my-3 font-semibold first:mt-0 last:mb-0", headingClassName)}
+              className={cn("my-1.5 font-semibold first:mt-0 last:mb-0", headingClassName)}
               {...props}
             />
           ),
           p: ({ className: paragraphClassName, ...props }) => (
             <p
               className={cn(
-                "my-3 leading-7 first:mt-0 last:mb-0",
+                "my-0.5 leading-6 first:mt-0 last:mb-0",
                 paragraphClassName
               )}
               {...props}
@@ -120,19 +170,19 @@ export function ChatMarkdown({
           ),
           blockquote: ({ className: blockquoteClassName, ...props }) => (
             <blockquote
-              className={cn("my-3 border-l-2 pl-4 italic", blockquoteClassName)}
+              className={cn("my-1.5 border-l-2 pl-4 italic", blockquoteClassName)}
               {...props}
             />
           ),
           ul: ({ className: listClassName, ...props }) => (
             <ul
-              className={cn("my-3 ml-6 list-disc [&>li]:mt-1", listClassName)}
+              className={cn("my-0.5 ml-5 list-disc [&>li]:mt-0 [&>li>p]:my-0", listClassName)}
               {...props}
             />
           ),
           ol: ({ className: listClassName, ...props }) => (
             <ol
-              className={cn("my-3 ml-6 list-decimal [&>li]:mt-1", listClassName)}
+              className={cn("my-0.5 ml-5 list-decimal [&>li]:mt-0 [&>li>p]:my-0", listClassName)}
               {...props}
             />
           ),
