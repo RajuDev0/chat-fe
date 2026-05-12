@@ -684,16 +684,15 @@ export function ChatShell() {
     content,
     pendingAssistantId,
   }: LegalAgentRequestPayload) {
-    const configuredTemplateId =
-      process.env.NEXT_PUBLIC_PPT_V2_TEMPLATE_ID ?? "1234";
     const configuredModel =
-      process.env.NEXT_PUBLIC_PPT_V2_MODEL ?? "openai/gpt-oss-120b";
+      process.env.NEXT_PUBLIC_PPT_MODEL ??
+      process.env.NEXT_PUBLIC_PPT_V2_MODEL ??
+      "openai/qwen3.6:35b";
     const payload = {
       chat_id: chatId,
       job_id: crypto.randomUUID(),
       query: content || "Create a presentation.",
       selected_models: [configuredModel],
-      template_id: configuredTemplateId,
     };
 
     activeRequestAbortRef.current?.abort();
