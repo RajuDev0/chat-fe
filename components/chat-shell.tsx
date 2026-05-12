@@ -47,16 +47,37 @@ type LegalAgentRequestPayload = ComposerSubmitPayload & {
   pendingAssistantId: string;
 };
 
+type AgentKey = "legal_agent" | "ppt_v2";
+
+type AgentOption = {
+  key: AgentKey;
+  label: string;
+  description: string;
+};
+
+const AGENT_OPTIONS: AgentOption[] = [
+  {
+    key: "legal_agent",
+    label: "Legal Agent",
+    description: "Legal Q&A and contract assistance.",
+  },
+  {
+    key: "ppt_v2",
+    label: "PPT Stream V2",
+    description: "Create or refine presentation content.",
+  },
+];
+
 type StreamActivity = {
   type:
-    | "status"
-    | "uploading_files"
-    | "files_ready"
-    | "review_ready"
-    | "review_started"
-    | "tool_start"
-    | "tool_end"
-    | "error";
+  | "status"
+  | "uploading_files"
+  | "files_ready"
+  | "review_ready"
+  | "review_started"
+  | "tool_start"
+  | "tool_end"
+  | "error";
   title: string;
   description?: string;
 };
@@ -115,6 +136,12 @@ function getEventText(event: Record<string, unknown>) {
 
 function normalizeStreamText(value: string) {
   return value.replace(/<\|nl\|>/g, "\n");
+}
+
+function detectLanguageFamily(text: string) {
+  return /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(text)
+    ? "arabic"
+    : "latin";
 }
 
 function AttachmentChip({
@@ -349,6 +376,7 @@ export function ChatShell() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatVersion, setChatVersion] = useState(0);
   const [chatId, setChatId] = useState(() => crypto.randomUUID());
+  const [selectedAgent, setSelectedAgent] = useState<AgentKey | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const shouldStickToBottomRef = useRef(true);
@@ -410,15 +438,12 @@ export function ChatShell() {
     });
 
     const formData = new FormData();
-    formData.append("mode", "contract_review");
+    formData.append("mode", "qna");
     formData.append("chat_id", chatId);
-    formData.append("language_family", "arabic");
-    formData.append("query", content || "Review this contract.");
+    formData.append("language_family", detectLanguageFamily(content || chatId));
+    formData.append("query", content || "Ask a legal question.");
     formData.append("selected_models", "groq/gpt-oss:120b");
-
-    attachments.forEach((attachment) => {
-      formData.append("files", attachment.file);
-    });
+    formData.append("knowledge_names", "contract");
 
     activeRequestAbortRef.current?.abort();
     const abortController = new AbortController();
@@ -429,10 +454,10 @@ export function ChatShell() {
         current.map((message) =>
           message.id === pendingAssistantId
             ? {
-                ...message,
-                content,
-                streaming: false,
-              }
+              ...message,
+              content,
+              streaming: false,
+            }
             : message
         )
       );
@@ -655,7 +680,153 @@ export function ChatShell() {
     return { response: assistantContent };
   }
 
+  async function callPptV2Agent({
+    content,
+    pendingAssistantId,
+  }: LegalAgentRequestPayload) {
+    const configuredTemplateId =
+      process.env.NEXT_PUBLIC_PPT_V2_TEMPLATE_ID ?? "1234";
+    const configuredModel =
+      process.env.NEXT_PUBLIC_PPT_V2_MODEL ?? "openai/gpt-oss-120b";
+    const payload = {
+      chat_id: chatId,
+      job_id: crypto.randomUUID(),
+      query: content || "Create a presentation.",
+      selected_models: [configuredModel],
+      template_id: configuredTemplateId,
+    };
+
+    activeRequestAbortRef.current?.abort();
+    const abortController = new AbortController();
+    activeRequestAbortRef.current = abortController;
+
+    function setActivity(activity: StreamActivity | null) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingAssistantId ? { ...message, activity } : message
+        )
+      );
+    }
+
+    function updateAssistant(updater: (message: Message) => Message) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingAssistantId ? updater(message) : message
+        )
+      );
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/ppt/stream`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
+          },
+          body: JSON.stringify(payload),
+          signal: abortController.signal,
+        }
+      );
+    } catch (error) {
+      activeRequestAbortRef.current = null;
+      throw error;
+    }
+
+    if (!response.ok) {
+      activeRequestAbortRef.current = null;
+      throw new Error(`PPT V2 request failed with status ${response.status}`);
+    }
+
+    if (!response.body) {
+      activeRequestAbortRef.current = null;
+      throw new Error("PPT V2 stream body is empty.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let assistantContent = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) {
+            continue;
+          }
+
+          let event: Record<string, unknown> & { type?: string };
+          try {
+            event = JSON.parse(trimmed);
+          } catch {
+            continue;
+          }
+
+          if (event.type === "metadata" || event.type === "planning") {
+            const contentText =
+              typeof event.content === "string"
+                ? event.content
+                : "PPT agent is preparing a response...";
+            setActivity({
+              type: "status",
+              title: contentText,
+            });
+            continue;
+          }
+
+          if (event.type === "final_answer") {
+            setActivity(null);
+            assistantContent = String(event.content || "").trim();
+            updateAssistant((message) => ({
+              ...message,
+              content: assistantContent || "No response returned.",
+              streaming: false,
+            }));
+            continue;
+          }
+
+          if (event.type === "error") {
+            setActivity({
+              type: "error",
+              title: "Stream error",
+              description: String(event.content || "Unknown error"),
+            });
+            assistantContent = String(event.content || "Failed to reach PPT V2.");
+            updateAssistant((message) => ({
+              ...message,
+              content: assistantContent,
+              streaming: false,
+            }));
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+      if (activeRequestAbortRef.current === abortController) {
+        activeRequestAbortRef.current = null;
+      }
+    }
+
+    return { response: assistantContent };
+  }
+
   async function submitMessage({ content, attachments }: ComposerSubmitPayload) {
+    if (!selectedAgent) {
+      return;
+    }
+
     const nextUserMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
@@ -675,20 +846,27 @@ export function ChatShell() {
     setMessages((current) => [...current, nextUserMessage, assistantMessage]);
 
     try {
-      const result = await callLegalAgent({
-        content,
-        attachments,
-        pendingAssistantId,
-      });
+      const result =
+        selectedAgent === "ppt_v2"
+          ? await callPptV2Agent({
+            content,
+            attachments,
+            pendingAssistantId,
+          })
+          : await callLegalAgent({
+            content,
+            attachments,
+            pendingAssistantId,
+          });
       if (!result.response?.trim()) {
         setMessages((current) =>
           current.map((message) =>
             message.id === pendingAssistantId
               ? {
-                  ...message,
-                  content: "No response returned.",
-                  streaming: false,
-                }
+                ...message,
+                content: "No response returned.",
+                streaming: false,
+              }
               : message
           )
         );
@@ -697,7 +875,9 @@ export function ChatShell() {
       const errorMessage =
         error instanceof Error
           ? error.message
-          : "Failed to reach the legal agent.";
+          : selectedAgent === "ppt_v2"
+            ? "Failed to reach PPT V2."
+            : "Failed to reach the legal agent.";
 
       if (error instanceof DOMException && error.name === "AbortError") {
         return;
@@ -707,10 +887,10 @@ export function ChatShell() {
         current.map((message) =>
           message.id === pendingAssistantId
             ? {
-                ...message,
-                content: errorMessage,
-                streaming: false,
-              }
+              ...message,
+              content: errorMessage,
+              streaming: false,
+            }
             : message
         )
       );
@@ -722,6 +902,7 @@ export function ChatShell() {
     setMessages([]);
     setChatVersion((current) => current + 1);
     setChatId(crypto.randomUUID());
+    setSelectedAgent(null);
   }
 
   function handleThemeToggle() {
@@ -783,10 +964,38 @@ export function ChatShell() {
               </div>
             </div>
 
+            <div className="mb-6 grid gap-3 sm:grid-cols-2">
+              {AGENT_OPTIONS.map((agent) => {
+                const isSelected = selectedAgent === agent.key;
+                return (
+                  <button
+                    key={agent.key}
+                    type="button"
+                    onClick={() => setSelectedAgent(agent.key)}
+                    className={`rounded-2xl border p-4 text-left transition ${isSelected
+                        ? "border-primary bg-primary/10"
+                        : "border-border bg-card hover:border-primary/50"
+                      }`}
+                    aria-pressed={isSelected}
+                  >
+                    <div className="text-sm font-semibold">{agent.label}</div>
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {agent.description}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
             <Composer
               key={`empty-${chatVersion}`}
               isDocked={false}
-              onSubmitMessage={submitMessage}
+              onSubmitMessage={(payload) => {
+                if (!selectedAgent) {
+                  return;
+                }
+                submitMessage(payload);
+              }}
             />
           </div>
         </main>
@@ -808,11 +1017,10 @@ export function ChatShell() {
                     className={`flex ${isUser ? "justify-end" : "justify-start"}`}
                   >
                     <div
-                      className={`max-w-[85%] ${
-                        isUser
+                      className={`max-w-[85%] ${isUser
                           ? "rounded-[20px] bg-primary px-4 py-3 text-primary-foreground"
                           : "px-1 py-1 text-foreground"
-                      }`}
+                        }`}
                     >
                       {message.attachments && message.attachments.length > 0 && (
                         <div className={`mb-3 flex flex-wrap gap-2 ${isUser ? "" : "ml-0.5"}`}>
