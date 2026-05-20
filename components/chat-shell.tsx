@@ -64,7 +64,7 @@ const AGENT_OPTIONS: AgentOption[] = [
   {
     key: "ppt_v2",
     label: "PPT Stream V2",
-    description: "Create or refine presentation content.",
+    description: "Create or refine presentation content. do it ",
   },
 ];
 
