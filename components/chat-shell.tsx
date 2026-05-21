@@ -691,7 +691,7 @@ export function ChatShell() {
     const payload = {
       chat_id: chatId,
       job_id: crypto.randomUUID(),
-      query: content || "Create a presentation.",
+      query: content || "Create a presentation of template.",
       selected_models: [configuredModel],
     };
 
