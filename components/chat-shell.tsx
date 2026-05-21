@@ -718,7 +718,7 @@ export function ChatShell() {
     let response: Response;
     try {
       response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/final-pptx`,
+        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/deck/stream`,
         {
           method: "POST",
           headers: {
