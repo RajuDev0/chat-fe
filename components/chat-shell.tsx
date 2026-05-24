@@ -687,7 +687,7 @@ export function ChatShell() {
     const configuredModel =
       process.env.NEXT_PUBLIC_PPT_MODEL ??
       process.env.NEXT_PUBLIC_PPT_V2_MODEL ??
-      "openai/qwen3.6:35b";
+      "openai/qwen3.6:27b";
     const payload = {
       chat_id: chatId,
       job_id: crypto.randomUUID(),
