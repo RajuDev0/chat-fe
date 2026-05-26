@@ -820,7 +820,7 @@ export function ChatShell() {
 
     return { response: assistantContent };
   }
-
+  console.log("hello world")
   async function submitMessage({ content, attachments }: ComposerSubmitPayload) {
     if (!selectedAgent) {
       return;
