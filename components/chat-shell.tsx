@@ -680,6 +680,7 @@ export function ChatShell() {
     return { response: assistantContent };
   }
 
+
   async function callPptV2Agent({
     content,
     pendingAssistantId,
@@ -820,7 +821,7 @@ export function ChatShell() {
 
     return { response: assistantContent };
   }
-  console.log("hello world")
+  console.log("hello world 2")
   async function submitMessage({ content, attachments }: ComposerSubmitPayload) {
     if (!selectedAgent) {
       return;
