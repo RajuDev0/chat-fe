@@ -639,7 +639,7 @@ export function ChatShell() {
             assistantContent =
               typeof event.message === "string"
                 ? event.message
-                : "Failed to reach the legal agent.";
+                : "Failed to reach the legal agent man.";
             updateAssistant((message) => ({
               ...message,
               content: assistantContent,
