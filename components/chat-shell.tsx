@@ -18,6 +18,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { AgentLoader } from "@/components/agent-loader";
 import { ChatMarkdown } from "@/components/chat-markdown";
+import { ContentPlan, type ContentPlanData } from "@/components/content-plan";
+import { ProgressSteps, type ProgressData } from "@/components/progress-steps";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 
@@ -36,6 +38,8 @@ type Message = {
   attachments?: Attachment[];
   activity?: StreamActivity | null;
   streaming?: boolean;
+  plan?: ContentPlanData | null;
+  progress?: ProgressData | null;
 };
 
 type ComposerSubmitPayload = {
@@ -599,6 +603,15 @@ export function ChatShell() {
             continue;
           }
 
+          if (event.type === "content_plan") {
+            setActivity(null);
+            const plan = event.content as ContentPlanData | undefined;
+            if (plan && Array.isArray(plan.slides)) {
+              updateAssistant((message) => ({ ...message, plan }));
+            }
+            continue;
+          }
+
           if (event.type === "delta") {
             setActivity(null);
             assistantContent += normalizeStreamText(String(event.content || ""));
@@ -786,6 +799,25 @@ export function ChatShell() {
             continue;
           }
 
+          if (event.type === "content_plan") {
+            setActivity(null);
+            const plan = event.content as ContentPlanData | undefined;
+            if (plan && Array.isArray(plan.slides)) {
+              // a plan supersedes any in-flight generation stepper
+              updateAssistant((message) => ({ ...message, plan, progress: null }));
+            }
+            continue;
+          }
+
+          if (event.type === "progress") {
+            setActivity(null);
+            const progress = event.content as ProgressData | undefined;
+            if (progress && Array.isArray(progress.steps)) {
+              updateAssistant((message) => ({ ...message, progress }));
+            }
+            continue;
+          }
+
           if (event.type === "final_answer") {
             setActivity(null);
             assistantContent = String(event.content || "").trim();
@@ -793,6 +825,9 @@ export function ChatShell() {
               ...message,
               content: assistantContent || "No response returned.",
               streaming: false,
+              // drop a still-running (non-done) indicator, e.g. a planning spinner that
+              // ended without a plan card; keep a completed deck stepper (collapsed).
+              progress: message.progress?.done ? message.progress : null,
             }));
             continue;
           }
@@ -1009,7 +1044,12 @@ export function ChatShell() {
             <section className="mx-auto flex w-full max-w-3xl flex-col gap-8">
               {messages.map((message) => {
                 const isUser = message.role === "user";
-                const isThinking = !isUser && message.streaming && !message.content.trim();
+                const isThinking =
+                  !isUser &&
+                  message.streaming &&
+                  !message.content.trim() &&
+                  !message.progress &&
+                  !message.plan;
 
                 return (
                   <article
@@ -1039,9 +1079,17 @@ export function ChatShell() {
                         </div>
                       )}
 
+                      {!isUser && message.progress ? (
+                        <ProgressSteps progress={message.progress} />
+                      ) : null}
+
+                      {!isUser && message.plan ? (
+                        <ContentPlan plan={message.plan} />
+                      ) : null}
+
                       {isThinking ? (
                         <AssistantThinkingLine activity={message.activity} />
-                      ) : (
+                      ) : message.content.trim() ? (
                         <ChatMarkdown
                           invert={isUser}
                           isAnimating={Boolean(message.streaming && !isUser)}
@@ -1049,7 +1097,7 @@ export function ChatShell() {
                         >
                           {message.content}
                         </ChatMarkdown>
-                      )}
+                      ) : null}
                     </div>
                   </article>
                 );
