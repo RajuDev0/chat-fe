@@ -807,11 +807,15 @@ export function ChatShell() {
           }
 
           if (event.type === "planning") {
-            const contentText =
-              typeof event.content === "string"
-                ? event.content
-                : "PPT agent is preparing a response...";
-            setActivity({ type: "status", title: contentText });
+            setActivity(null);
+            // planning carries a bare todos array [{content, status}] (same shape as the
+            // other pptx pipeline); a plain string is just an activity/status line.
+            const todos = event.content as ProgressData | undefined;
+            if (Array.isArray(todos)) {
+              updateAssistant((message) => ({ ...message, progress: todos }));
+            } else if (typeof event.content === "string") {
+              setActivity({ type: "status", title: event.content });
+            }
             continue;
           }
 
@@ -825,15 +829,6 @@ export function ChatShell() {
             continue;
           }
 
-          if (event.type === "progress") {
-            setActivity(null);
-            const progress = event.content as ProgressData | undefined;
-            if (progress && Array.isArray(progress.steps)) {
-              updateAssistant((message) => ({ ...message, progress }));
-            }
-            continue;
-          }
-
           if (event.type === "final_answer") {
             setActivity(null);
             assistantContent = String(event.content || "").trim();
@@ -841,9 +836,13 @@ export function ChatShell() {
               ...message,
               content: assistantContent || "No response returned.",
               streaming: false,
-              // drop a still-running (non-done) indicator, e.g. a planning spinner that
-              // ended without a plan card; keep a completed deck stepper (collapsed).
-              progress: message.progress?.done ? message.progress : null,
+              // drop a still-running indicator; keep a fully-completed todos list (collapsed).
+              progress:
+                Array.isArray(message.progress) &&
+                message.progress.length > 0 &&
+                message.progress.every((t) => t.status === "completed")
+                  ? message.progress
+                  : null,
             }));
             continue;
           }
