@@ -3,6 +3,7 @@
 import {
   ArrowDown,
   ArrowUp,
+  Download,
   FileBadge,
   FileText,
   FileType,
@@ -40,6 +41,7 @@ type Message = {
   streaming?: boolean;
   plan?: ContentPlanData | null;
   progress?: ProgressData | null;
+  download?: { chatId: string; filename: string } | null;
 };
 
 type ComposerSubmitPayload = {
@@ -787,15 +789,29 @@ export function ChatShell() {
             continue;
           }
 
-          if (event.type === "metadata" || event.type === "planning") {
+          if (event.type === "metadata") {
+            // the deck is rendered → capture the .pptx so we can show a download button
+            const c = event.content as
+              | { output_pptx_path?: string; file_paths?: string[] }
+              | undefined;
+            const p =
+              c?.output_pptx_path ||
+              (Array.isArray(c?.file_paths) ? c?.file_paths?.[0] : "") ||
+              "";
+            const filename = String(p).split("/").pop() || "";
+            if (filename.toLowerCase().endsWith(".pptx")) {
+              const dl = { chatId, filename };
+              updateAssistant((message) => ({ ...message, download: dl }));
+            }
+            continue;
+          }
+
+          if (event.type === "planning") {
             const contentText =
               typeof event.content === "string"
                 ? event.content
                 : "PPT agent is preparing a response...";
-            setActivity({
-              type: "status",
-              title: contentText,
-            });
+            setActivity({ type: "status", title: contentText });
             continue;
           }
 
@@ -856,7 +872,33 @@ export function ChatShell() {
 
     return { response: assistantContent };
   }
-  console.log("hello world 2")
+  async function downloadPptx(chatIdForFile: string, filename: string) {
+    // the download endpoint is auth-protected, so fetch with the bearer token and save the
+    // blob (a plain <a href> can't send the Authorization header).
+    try {
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/download/${chatIdForFile}/${encodeURIComponent(filename)}`,
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
+          },
+        }
+      );
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      /* swallow — a failed download shouldn't break the chat */
+    }
+  }
+
   async function submitMessage({ content, attachments }: ComposerSubmitPayload) {
     if (!selectedAgent) {
       return;
@@ -1097,6 +1139,22 @@ export function ChatShell() {
                         >
                           {message.content}
                         </ChatMarkdown>
+                      ) : null}
+
+                      {!isUser && message.download ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            downloadPptx(
+                              message.download!.chatId,
+                              message.download!.filename
+                            )
+                          }
+                          className="mt-3 inline-flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-[14px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+                        >
+                          <Download className="h-4 w-4" />
+                          Download PPTX
+                        </button>
                       ) : null}
                     </div>
                   </article>
