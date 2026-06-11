@@ -5,6 +5,8 @@ export type ContentPlanSlide = {
   type: string;
   key_message: string;
   section?: string;
+  subtitle?: string; // the slide's secondary line — shown under the title, not as a bullet
+  content?: string[]; // real line-by-line slide content (bullets / body) for review
 };
 
 export type ContentPlanData = {
@@ -34,10 +36,44 @@ function chipClass(type: string): string {
   return "bg-muted text-muted-foreground";
 }
 
+// Human-readable labels for the internal recipe/intent/layout ids. Anything not listed falls
+// back to a tidy title-cased version of the raw id.
+const TYPE_LABELS: Record<string, string> = {
+  // structural
+  title: "Title",
+  table_of_contents: "Agenda",
+  divider: "Section",
+  ending: "Closing",
+  // recipes
+  card_grid: "Cards",
+  stat_band: "Key Stats",
+  hero_stat: "Big Number",
+  lead_visual: "Chart + Points",
+  process_strip: "Process",
+  framework: "Matrix",
+  compare_2up: "Comparison",
+  spotlight: "Quote",
+  image_split: "Image + Points",
+  numbered_points: "Numbered List",
+  // intents
+  timeline: "Timeline",
+  list: "List",
+  narrative: "Text",
+  quote: "Quote",
+  chart: "Chart",
+  matrix: "Matrix",
+  flow: "Flow",
+  metrics: "Key Stats",
+  features: "Features",
+  comparison: "Comparison",
+  process: "Process",
+  content: "Content",
+};
+
 function prettyType(type: string): string {
-  return (type || "content")
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const key = (type || "content").toLowerCase();
+  if (TYPE_LABELS[key]) return TYPE_LABELS[key];
+  return key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 export function ContentPlan({ plan }: { plan: ContentPlanData }) {
@@ -49,7 +85,7 @@ export function ContentPlan({ plan }: { plan: ContentPlanData }) {
       {/* header */}
       <div className="border-b border-border px-4 py-3">
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          <span>Content Plan</span>
+          <span>Deck Content</span>
           <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">
             {slides.length} slides
           </span>
@@ -93,9 +129,27 @@ export function ContentPlan({ plan }: { plan: ContentPlanData }) {
                 ) : null}
               </div>
               {s.key_message ? (
-                <p className="mt-0.5 text-[14px] leading-snug text-foreground">
+                <p className="mt-0.5 text-[14px] font-semibold leading-snug text-foreground">
                   {s.key_message}
                 </p>
+              ) : null}
+              {s.subtitle ? (
+                <p className="mt-0.5 text-[12.5px] italic leading-snug text-muted-foreground">
+                  {s.subtitle}
+                </p>
+              ) : null}
+              {s.content && s.content.length > 0 ? (
+                <ul className="mt-1 space-y-0.5">
+                  {s.content.map((line, j) => (
+                    <li
+                      key={j}
+                      className="flex gap-1.5 text-[12.5px] leading-snug text-muted-foreground"
+                    >
+                      <span className="mt-[3px] h-1 w-1 shrink-0 rounded-full bg-muted-foreground/50" />
+                      <span className="min-w-0">{line}</span>
+                    </li>
+                  ))}
+                </ul>
               ) : null}
             </div>
           </li>
