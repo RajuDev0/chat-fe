@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowUp,
   Download,
+  Eye,
   FileBadge,
   FileText,
   FileType,
@@ -20,6 +21,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AgentLoader } from "@/components/agent-loader";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ContentPlan, type ContentPlanData } from "@/components/content-plan";
+import { DeckPanel } from "@/components/deck-panel";
 import { ProgressSteps, type ProgressData } from "@/components/progress-steps";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -41,7 +43,13 @@ type Message = {
   streaming?: boolean;
   plan?: ContentPlanData | null;
   progress?: ProgressData | null;
-  download?: { chatId: string; filename: string } | null;
+  download?: {
+    chatId: string;
+    filename: string;
+    path?: string;
+    version?: number | null;
+    slideCount?: number | null;
+  } | null;
 };
 
 type ComposerSubmitPayload = {
@@ -388,6 +396,17 @@ export function ChatShell() {
   const shouldStickToBottomRef = useRef(true);
   const previousMessageCountRef = useRef(0);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [deck, setDeck] = useState<{
+    messageId: string;
+    chatId: string;
+    slideCount: number;
+    version?: number | null;
+    title?: string;
+  } | null>(null);
+  // deck panel defaults to 60% of the viewport (chat keeps the remaining 40%); user can drag.
+  const [deckWidth, setDeckWidth] = useState(() =>
+    typeof window !== "undefined" ? Math.round(window.innerWidth * 0.6) : 720
+  );
   const activeRequestAbortRef = useRef<AbortController | null>(null);
 
   const hasMessages = messages.length > 0;
@@ -792,15 +811,30 @@ export function ChatShell() {
           if (event.type === "metadata") {
             // the deck is rendered → capture the .pptx so we can show a download button
             const c = event.content as
-              | { output_pptx_path?: string; file_paths?: string[] }
+              | {
+                  file_path?: string;
+                  output_pptx_path?: string;
+                  file_paths?: string[];
+                  version?: number | null;
+                  slide_count?: number | null;
+                }
               | undefined;
             const p =
+              c?.file_path ||
               c?.output_pptx_path ||
               (Array.isArray(c?.file_paths) ? c?.file_paths?.[0] : "") ||
               "";
-            const filename = String(p).split("/").pop() || "";
+            const path = String(p);
+            const filename = path.split("/").pop() || "";
             if (filename.toLowerCase().endsWith(".pptx")) {
-              const dl = { chatId, filename };
+              // version is the snapshot this turn produced — downloading this turn re-renders
+              // that exact version on the fly (not the latest deck). path is the exact deck path
+              // the backend advertised — we send it back so it serves that file verbatim.
+              const version =
+                typeof c?.version === "number" ? c.version : null;
+              const slideCount =
+                typeof c?.slide_count === "number" ? c.slide_count : null;
+              const dl = { chatId, filename, path, version, slideCount };
               updateAssistant((message) => ({ ...message, download: dl }));
             }
             continue;
@@ -871,12 +905,23 @@ export function ChatShell() {
 
     return { response: assistantContent };
   }
-  async function downloadPptx(chatIdForFile: string, filename: string) {
+  async function downloadPptx(
+    chatIdForFile: string,
+    filename: string,
+    version?: number | null,
+    path?: string
+  ) {
     // the download endpoint is auth-protected, so fetch with the bearer token and save the
-    // blob (a plain <a href> can't send the Authorization header).
+    // blob (a plain <a href> can't send the Authorization header). When a version is attached
+    // to this turn, ask the backend to render THAT version on the fly (not the latest deck);
+    // otherwise pass the exact deck path the metadata advertised so it serves that file.
     try {
+      const params = new URLSearchParams();
+      if (typeof version === "number") params.set("version", String(version));
+      if (path) params.set("path", path);
+      const query = params.toString() ? `?${params.toString()}` : "";
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/download/${chatIdForFile}/${encodeURIComponent(filename)}`,
+        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/download/${chatIdForFile}/${encodeURIComponent(filename)}${query}`,
         {
           headers: {
             Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
@@ -1076,7 +1121,12 @@ export function ChatShell() {
           </div>
         </main>
       ) : (
-        <main className="relative mx-auto h-screen w-full max-w-4xl px-4 pt-24 sm:px-6">
+        <main
+          className={`relative h-screen px-4 pt-24 transition-[padding] duration-200 sm:px-6 ${
+            deck ? "w-full" : "mx-auto w-full max-w-4xl"
+          }`}
+          style={deck ? { paddingRight: deckWidth } : undefined}
+        >
           <div
             ref={scrollContainerRef}
             className="chat-scrollbar h-full overflow-y-auto pb-44 pr-1"
@@ -1141,19 +1191,48 @@ export function ChatShell() {
                       ) : null}
 
                       {!isUser && message.download ? (
-                        <button
-                          type="button"
-                          onClick={() =>
-                            downloadPptx(
-                              message.download!.chatId,
-                              message.download!.filename
-                            )
-                          }
-                          className="mt-3 inline-flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-[14px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
-                        >
-                          <Download className="h-4 w-4" />
-                          Download PPTX
-                        </button>
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                          {message.download.slideCount ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setDeck({
+                                  messageId: message.id,
+                                  chatId: message.download!.chatId,
+                                  slideCount: message.download!.slideCount!,
+                                  version: message.download!.version,
+                                  title: message.download!.filename?.replace(
+                                    /\.pptx$/i,
+                                    ""
+                                  ),
+                                })
+                              }
+                              className={`inline-flex items-center gap-2 rounded-full border px-4 py-2 text-[14px] font-medium transition-colors ${
+                                deck?.messageId === message.id
+                                  ? "border-primary bg-primary/10 text-primary ring-1 ring-primary"
+                                  : "border-border bg-background text-foreground hover:bg-muted"
+                              }`}
+                            >
+                              <Eye className="h-4 w-4" />
+                              View
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              downloadPptx(
+                                message.download!.chatId,
+                                message.download!.filename,
+                                message.download!.version,
+                                message.download!.path
+                              )
+                            }
+                            className="inline-flex items-center gap-2 rounded-full bg-primary px-4 py-2 text-[14px] font-medium text-primary-foreground transition-opacity hover:opacity-90"
+                          >
+                            <Download className="h-4 w-4" />
+                            Download PPTX
+                          </button>
+                        </div>
                       ) : null}
                     </div>
                   </article>
@@ -1163,9 +1242,27 @@ export function ChatShell() {
             </section>
           </div>
 
-          <div className="pointer-events-none fixed inset-x-0 bottom-0 h-36 bg-[linear-gradient(180deg,var(--composer-fade-start),var(--composer-fade-end)_42%,var(--app-bg))]" />
+          {deck ? (
+            <DeckPanel
+              chatId={deck.chatId}
+              slideCount={deck.slideCount}
+              version={deck.version}
+              title={deck.title}
+              width={deckWidth}
+              onWidthChange={setDeckWidth}
+              onClose={() => setDeck(null)}
+            />
+          ) : null}
+
+          <div
+            className="pointer-events-none fixed inset-x-0 bottom-0 h-36 bg-[linear-gradient(180deg,var(--composer-fade-start),var(--composer-fade-end)_42%,var(--app-bg))]"
+            style={deck ? { right: deckWidth } : undefined}
+          />
           {showScrollToBottom && (
-            <div className="fixed bottom-28 right-4 z-20 sm:right-8">
+            <div
+              className="fixed bottom-28 right-4 z-20 sm:right-8"
+              style={deck ? { right: deckWidth + 16 } : undefined}
+            >
               <Button
                 type="button"
                 size="icon"
@@ -1178,7 +1275,10 @@ export function ChatShell() {
               </Button>
             </div>
           )}
-          <div className="fixed inset-x-0 bottom-0 px-4 pb-5 sm:px-6">
+          <div
+            className="fixed inset-x-0 bottom-0 px-4 pb-5 transition-[right] duration-200 sm:px-6"
+            style={deck ? { right: deckWidth } : undefined}
+          >
             <div className="mx-auto w-full max-w-3xl">
               <Composer
                 key={`chat-${chatVersion}`}
