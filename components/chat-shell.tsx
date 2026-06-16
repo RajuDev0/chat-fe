@@ -836,6 +836,19 @@ export function ChatShell() {
                 typeof c?.slide_count === "number" ? c.slide_count : null;
               const dl = { chatId, filename, path, version, slideCount };
               updateAssistant((message) => ({ ...message, download: dl }));
+              // auto-activate this fresh deck/version in the side panel so the user sees the new
+              // render immediately (no need to click View each turn). The View button on this
+              // message highlights because deck.messageId matches it; DeckSlides re-fetches since
+              // its version prop changed.
+              if (typeof slideCount === "number" && slideCount > 0) {
+                setDeck({
+                  messageId: pendingAssistantId,
+                  chatId,
+                  slideCount,
+                  version,
+                  title: filename.replace(/\.pptx$/i, ""),
+                });
+              }
             }
             continue;
           }
@@ -912,16 +925,17 @@ export function ChatShell() {
     path?: string
   ) {
     // the download endpoint is auth-protected, so fetch with the bearer token and save the
-    // blob (a plain <a href> can't send the Authorization header). When a version is attached
-    // to this turn, ask the backend to render THAT version on the fly (not the latest deck);
-    // otherwise pass the exact deck path the metadata advertised so it serves that file.
+    // blob (a plain <a href> can't send the Authorization header). The deck is identified by
+    // version or path (no filename in the URL): when a version is attached to this turn, ask the
+    // backend to render THAT version on the fly (not the latest deck); otherwise pass the exact
+    // deck path the metadata advertised so it serves that file. `filename` is only the saved name.
     try {
       const params = new URLSearchParams();
       if (typeof version === "number") params.set("version", String(version));
       if (path) params.set("path", path);
       const query = params.toString() ? `?${params.toString()}` : "";
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/download/${chatIdForFile}/${encodeURIComponent(filename)}${query}`,
+        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/download/${chatIdForFile}${query}`,
         {
           headers: {
             Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
