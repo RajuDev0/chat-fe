@@ -65,8 +65,13 @@ export function DeckSlides({
   const [canNext, setCanNext] = useState(false);
   const railRef = useRef<HTMLDivElement | null>(null);
 
-  // every object URL we created, for cleanup on unmount
+  // every object URL we created, for cleanup; selectedRef mirrors `selected` so an async refetch
+  // can read the latest viewed slide without re-running on every selection change.
   const createdRef = useRef<string[]>([]);
+  const selectedRef = useRef(0);
+  useEffect(() => {
+    selectedRef.current = selected;
+  }, [selected]);
 
   // duration: lower = snappier slide transitions (Embla default ~25)
   const [emblaRef, emblaApi] = useEmblaCarousel({
@@ -75,14 +80,18 @@ export function DeckSlides({
     duration: 15,
   });
 
-  // ONE request loads the whole deck. The deck/version is keyed at the call site
-  // (key={chatId|version}), so a deck change remounts this component and re-runs this effect.
+  // ONE request loads the whole deck; re-runs when the deck/version changes (an edit turn). The
+  // component is keyed on chatId only (NOT version) so an edit does NOT remount/reset — we keep the
+  // user on the slide they were viewing instead of snapping back to slide 1.
   useEffect(() => {
     if (!chatId || slideCount < 1) return;
     let cancelled = false;
+    const keepIndex = selectedRef.current; // where the user is, to restore after the refetch
     (async () => {
       const slides = await fetchDeckBatch(chatId, version);
       if (cancelled || !slides) return;
+      const prev = createdRef.current;
+      const created: string[] = [];
       const next: (string | null)[] = new Array(slideCount).fill(null);
       for (const s of slides) {
         const i = s.index - 1;
@@ -90,19 +99,26 @@ export function DeckSlides({
         const url = URL.createObjectURL(
           new Blob([s.svg], { type: "image/svg+xml" })
         );
-        createdRef.current.push(url);
+        created.push(url);
         next[i] = url;
       }
       if (cancelled) {
-        next.forEach((u) => u && URL.revokeObjectURL(u));
+        created.forEach((u) => URL.revokeObjectURL(u));
         return;
       }
+      createdRef.current = created;
       setUrls(next);
+      prev.forEach((u) => URL.revokeObjectURL(u)); // free the previous batch
+      // if the deck count changed, embla reInits to slide 0 — restore the viewed slide
+      const target = Math.min(keepIndex, slideCount - 1);
+      if (target > 0) {
+        requestAnimationFrame(() => emblaApi?.scrollTo(target, true));
+      }
     })();
     return () => {
       cancelled = true;
     };
-  }, [chatId, slideCount, version]);
+  }, [chatId, slideCount, version, emblaApi]);
 
   // Revoke any object URLs we created on unmount.
   useEffect(() => {
