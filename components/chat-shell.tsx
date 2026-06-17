@@ -96,6 +96,43 @@ type StreamActivity = {
   description?: string;
 };
 
+function createId() {
+  if (
+    typeof globalThis !== "undefined" &&
+    globalThis.crypto &&
+    typeof globalThis.crypto.randomUUID === "function"
+  ) {
+    return globalThis.crypto.randomUUID();
+  }
+
+  const bytes = new Uint8Array(16);
+
+  if (
+    typeof globalThis !== "undefined" &&
+    globalThis.crypto &&
+    typeof globalThis.crypto.getRandomValues === "function"
+  ) {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  // RFC 4122 version 4 UUID bits.
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return [
+    hex.slice(0, 4).join(""),
+    hex.slice(4, 6).join(""),
+    hex.slice(6, 8).join(""),
+    hex.slice(8, 10).join(""),
+    hex.slice(10, 16).join(""),
+  ].join("-");
+}
+
 function getFileExtension(name: string) {
   return name.split(".").pop()?.toLowerCase() ?? "";
 }
@@ -389,7 +426,7 @@ export function ChatShell() {
   const { resolvedTheme, setTheme } = useTheme();
   const [messages, setMessages] = useState<Message[]>([]);
   const [chatVersion, setChatVersion] = useState(0);
-  const [chatId, setChatId] = useState(() => crypto.randomUUID());
+  const [chatId, setChatId] = useState(() => createId());
   const [selectedAgent, setSelectedAgent] = useState<AgentKey | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -725,7 +762,7 @@ export function ChatShell() {
       "openai/qwen3.6:27b";
     const payload = {
       chat_id: chatId,
-      job_id: crypto.randomUUID(),
+      job_id: createId(),
       query: content || "Create a presentation of template.",
       selected_models: [configuredModel],
     };
@@ -963,13 +1000,13 @@ export function ChatShell() {
     }
 
     const nextUserMessage: Message = {
-      id: crypto.randomUUID(),
+      id: createId(),
       role: "user",
       content: content || "Attached files.",
       attachments,
     };
 
-    const pendingAssistantId = crypto.randomUUID();
+    const pendingAssistantId = createId();
     const assistantMessage: Message = {
       id: pendingAssistantId,
       role: "assistant",
@@ -1036,7 +1073,7 @@ export function ChatShell() {
     activeRequestAbortRef.current?.abort();
     setMessages([]);
     setChatVersion((current) => current + 1);
-    setChatId(crypto.randomUUID());
+    setChatId(createId());
     setSelectedAgent(null);
   }
 

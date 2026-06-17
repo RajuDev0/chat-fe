@@ -52,6 +52,7 @@ export function DeckViewer({
       </div>
       <div className="min-h-0 flex-1 pb-4">
         <DeckSlides
+          key={`${chatId}-${version ?? "latest"}`}
           chatId={chatId}
           slideCount={slideCount}
           version={version}

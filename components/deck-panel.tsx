@@ -102,6 +102,7 @@ export function DeckPanel({
         {/* carousel — keys disabled while the full-screen view owns them */}
         <div className="min-h-0 flex-1 py-2">
           <DeckSlides
+            key={`${chatId}-${version ?? "latest"}`}
             chatId={chatId}
             slideCount={slideCount}
             version={version}

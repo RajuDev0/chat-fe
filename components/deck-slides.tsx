@@ -16,18 +16,22 @@ type DeckSlidesProps = {
   enableKeys?: boolean;
 };
 
-// Fetch one slide's rendered SVG with the bearer token → object URL. The preview endpoint is
-// auth-protected, so a plain <img src> can't reach it (same pattern as the download).
-async function fetchSlideUrl(
+type BatchSlide = { index: number; etag: string; svg: string };
+
+// Fetch the WHOLE deck in ONE request — every slide's SVG inline — then turn each into an object
+// URL locally. The endpoint is auth-protected (bearer header), and `fetch` uses the browser HTTP
+// cache, so the backend's ETag means a reopened/unchanged deck revalidates with a cheap 304
+// instead of re-sending the payload.
+async function fetchDeckBatch(
   chatId: string,
-  slideNo: number,
   version?: number | null
-): Promise<string | null> {
+): Promise<BatchSlide[] | null> {
   try {
-    const versionQuery =
-      typeof version === "number" ? `?version=${version}` : "";
+    const params = new URLSearchParams();
+    if (typeof version === "number") params.set("version", String(version));
+    const qs = params.toString() ? `?${params.toString()}` : "";
     const res = await fetch(
-      `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/preview/${chatId}/${slideNo}${versionQuery}`,
+      `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/preview/${chatId}/batch${qs}`,
       {
         headers: {
           Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
@@ -35,8 +39,8 @@ async function fetchSlideUrl(
       }
     );
     if (!res.ok) return null;
-    const blob = await res.blob();
-    return URL.createObjectURL(blob);
+    const data = await res.json();
+    return Array.isArray(data?.slides) ? (data.slides as BatchSlide[]) : null;
   } catch {
     return null;
   }
@@ -53,11 +57,16 @@ export function DeckSlides({
   dark = false,
   enableKeys = true,
 }: DeckSlidesProps) {
-  const [urls, setUrls] = useState<(string | null)[]>([]);
+  // undefined = not loaded yet, null = missing/failed, string = object URL. Filled in one shot
+  // from the single batch request below (index-aligned: urls[i] ↔ slide i+1).
+  const [urls, setUrls] = useState<(string | null | undefined)[]>([]);
   const [selected, setSelected] = useState(0);
   const [canPrev, setCanPrev] = useState(false);
   const [canNext, setCanNext] = useState(false);
   const railRef = useRef<HTMLDivElement | null>(null);
+
+  // every object URL we created, for cleanup on unmount
+  const createdRef = useRef<string[]>([]);
 
   // duration: lower = snappier slide transitions (Embla default ~25)
   const [emblaRef, emblaApi] = useEmblaCarousel({
@@ -66,28 +75,42 @@ export function DeckSlides({
     duration: 15,
   });
 
+  // ONE request loads the whole deck. The deck/version is keyed at the call site
+  // (key={chatId|version}), so a deck change remounts this component and re-runs this effect.
   useEffect(() => {
-    if (!chatId || !slideCount || slideCount < 1) return;
+    if (!chatId || slideCount < 1) return;
     let cancelled = false;
-    const created: string[] = [];
     (async () => {
-      const results = await Promise.all(
-        Array.from({ length: slideCount }, (_, i) =>
-          fetchSlideUrl(chatId, i + 1, version)
-        )
-      );
+      const slides = await fetchDeckBatch(chatId, version);
+      if (cancelled || !slides) return;
+      const next: (string | null)[] = new Array(slideCount).fill(null);
+      for (const s of slides) {
+        const i = s.index - 1;
+        if (i < 0 || i >= slideCount || !s.svg) continue;
+        const url = URL.createObjectURL(
+          new Blob([s.svg], { type: "image/svg+xml" })
+        );
+        createdRef.current.push(url);
+        next[i] = url;
+      }
       if (cancelled) {
-        results.forEach((u) => u && URL.revokeObjectURL(u));
+        next.forEach((u) => u && URL.revokeObjectURL(u));
         return;
       }
-      results.forEach((u) => u && created.push(u));
-      setUrls(results);
+      setUrls(next);
     })();
     return () => {
       cancelled = true;
-      created.forEach((u) => URL.revokeObjectURL(u));
     };
   }, [chatId, slideCount, version]);
+
+  // Revoke any object URLs we created on unmount.
+  useEffect(() => {
+    return () => {
+      createdRef.current.forEach((u) => URL.revokeObjectURL(u));
+      createdRef.current = [];
+    };
+  }, []);
 
   const onSelect = useCallback(() => {
     if (!emblaApi) return;
