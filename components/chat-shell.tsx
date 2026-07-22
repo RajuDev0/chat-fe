@@ -57,11 +57,11 @@ type ComposerSubmitPayload = {
   content: string;
 };
 
-type LegalAgentRequestPayload = ComposerSubmitPayload & {
+type AgentRequestPayload = ComposerSubmitPayload & {
   pendingAssistantId: string;
 };
 
-type AgentKey = "legal_agent" | "ppt_v2";
+type AgentKey = "ppt_v3" | "ppt_v2";
 
 type AgentOption = {
   key: AgentKey;
@@ -71,9 +71,9 @@ type AgentOption = {
 
 const AGENT_OPTIONS: AgentOption[] = [
   {
-    key: "legal_agent",
-    label: "Legal Agent",
-    description: "Legal Q&A and contract assistance.",
+    key: "ppt_v3",
+    label: "PPT Stream V3",
+    description: "Catalog-driven deck generation (v3 pipeline).",
   },
   {
     key: "ppt_v2",
@@ -487,40 +487,37 @@ export function ChatShell() {
     };
   }, [messages]);
 
-  async function callLegalAgent({
+  async function callPptV3Agent({
     content,
-    attachments,
     pendingAssistantId,
-  }: LegalAgentRequestPayload) {
-    console.info("[legal-agent] submitting request", {
-      chatId,
-      attachmentCount: attachments.length,
-      attachmentNames: attachments.map((attachment) => attachment.name),
-      hasContent: Boolean(content.trim()),
-    });
-
-    const formData = new FormData();
-    formData.append("mode", "qna");
-    formData.append("chat_id", chatId);
-    formData.append("language_family", detectLanguageFamily(content || chatId));
-    formData.append("query", content || "Ask a legal question.");
-    formData.append("selected_models", "groq/gpt-oss:120b");
-    formData.append("knowledge_names", "contract");
+  }: AgentRequestPayload) {
+    const configuredModel =
+      process.env.NEXT_PUBLIC_PPT_MODEL ??
+      process.env.NEXT_PUBLIC_PPT_V2_MODEL ??
+      "groq/qwen3.6:27b";
+    const payload = {
+      chat_id: chatId,
+      job_id: createId(),
+      query: content || "Create a presentation.",
+      selected_models: [configuredModel],
+    };
 
     activeRequestAbortRef.current?.abort();
     const abortController = new AbortController();
     activeRequestAbortRef.current = abortController;
 
-    function finalizeAssistantMessage(content: string) {
+    function setActivity(activity: StreamActivity | null) {
       setMessages((current) =>
         current.map((message) =>
-          message.id === pendingAssistantId
-            ? {
-              ...message,
-              content,
-              streaming: false,
-            }
-            : message
+          message.id === pendingAssistantId ? { ...message, activity } : message
+        )
+      );
+    }
+
+    function updateAssistant(updater: (message: Message) => Message) {
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === pendingAssistantId ? updater(message) : message
         )
       );
     }
@@ -528,13 +525,14 @@ export function ChatShell() {
     let response: Response;
     try {
       response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/agent_rag/legal_agent/stream`,
+        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/deck/v3/stream`,
         {
           method: "POST",
           headers: {
+            "Content-Type": "application/json",
             Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
           },
-          body: formData,
+          body: JSON.stringify(payload),
           signal: abortController.signal,
         }
       );
@@ -544,27 +542,13 @@ export function ChatShell() {
     }
 
     if (!response.ok) {
-      console.error("[legal-agent] request failed", {
-        status: response.status,
-        chatId,
-        attachmentCount: attachments.length,
-      });
       activeRequestAbortRef.current = null;
-      throw new Error(`Legal agent request failed with status ${response.status}`);
+      throw new Error(`PPT V3 request failed with status ${response.status}`);
     }
 
-    console.info("[legal-agent] response received", {
-      chatId,
-      status: response.status,
-      attachmentCount: attachments.length,
-    });
-
-    const contentType = response.headers.get("content-type") || "";
-    if (!response.body || !contentType.includes("application/x-ndjson")) {
-      const json = (await response.json()) as { response?: string };
-      finalizeAssistantMessage(json.response?.trim() || "No response returned.");
+    if (!response.body) {
       activeRequestAbortRef.current = null;
-      return json;
+      throw new Error("PPT V3 stream body is empty.");
     }
 
     const reader = response.body.getReader();
@@ -572,35 +556,9 @@ export function ChatShell() {
     let buffer = "";
     let assistantContent = "";
 
-    function setActivity(activity: StreamActivity | null) {
-      setMessages((current) =>
-        current.map((message) => {
-          if (message.id !== pendingAssistantId) {
-            return message;
-          }
-
-          return {
-            ...message,
-            activity,
-          };
-        })
-      );
-    }
-
-    function updateAssistant(
-      updater: (message: Message) => Message
-    ) {
-      setMessages((current) =>
-        current.map((message) =>
-          message.id === pendingAssistantId ? updater(message) : message
-        )
-      );
-    }
-
     try {
       while (true) {
         const { done, value } = await reader.read();
-
         if (done) {
           break;
         }
@@ -622,42 +580,32 @@ export function ChatShell() {
             continue;
           }
 
-          if (
-            event.type === "status" ||
-            event.type === "uploading_files" ||
-            event.type === "files_ready" ||
-            event.type === "review_ready" ||
-            event.type === "review_started"
-          ) {
-            setActivity({
-              type: "status",
-              title: String(
-                event.message || event.stage || "Agent is thinking..."
-              ),
-              description:
-                typeof event.stage === "string" && event.stage !== "prompt"
-                  ? event.stage
-                  : undefined,
-            });
+          if (event.type === "metadata") {
+            // v3 signals the rendered deck with {deck_v3_ready: true} — the file is
+            // always the chat's deck_v3.pptx served by /deck/v3/download/{chat_id}.
+            const c = event.content as
+              | { deck_v3_ready?: boolean; chat_id?: string }
+              | undefined;
+            if (c?.deck_v3_ready) {
+              updateAssistant((message) => ({
+                ...message,
+                download: {
+                  chatId,
+                  filename: "presentation.pptx",
+                  path: "deck_v3",
+                  version: null,
+                  slideCount: null,
+                },
+              }));
+            }
             continue;
           }
 
-          if (event.type === "tool") {
-            const phase = event.phase === "end" ? "end" : "start";
-            const toolName = String(event.tool || "unknown");
-            setActivity({
-              type: phase === "end" ? "tool_end" : "tool_start",
-              title:
-                phase === "end"
-                  ? `Tool result: ${toolName}`
-                  : `Tool call: ${toolName}`,
-              description:
-                typeof event.input === "string"
-                  ? event.input
-                  : typeof event.output === "string"
-                    ? event.output
-                    : undefined,
-            });
+          if (event.type === "planning") {
+            setActivity(null);
+            if (typeof event.content === "string") {
+              setActivity({ type: "status", title: event.content });
+            }
             continue;
           }
 
@@ -670,26 +618,9 @@ export function ChatShell() {
             continue;
           }
 
-          if (event.type === "delta") {
+          if (event.type === "final_answer") {
             setActivity(null);
-            assistantContent += normalizeStreamText(String(event.content || ""));
-            updateAssistant((message) => ({
-              ...message,
-              content: assistantContent,
-            }));
-            continue;
-          }
-
-          if (
-            event.type === "final_answer" ||
-            event.type === "final"
-          ) {
-            setActivity(null);
-            const finalText = getEventText(event);
-            const preferredFinalText =
-              normalizeStreamText(finalText).trim() ||
-              assistantContent.trim();
-            assistantContent = preferredFinalText;
+            assistantContent = String(event.content || "").trim();
             updateAssistant((message) => ({
               ...message,
               content: assistantContent || "No response returned.",
@@ -702,43 +633,15 @@ export function ChatShell() {
             setActivity({
               type: "error",
               title: "Stream error",
-              description:
-                typeof event.message === "string"
-                  ? event.message
-                  : "Unknown error",
+              description: String(event.content || "Unknown error"),
             });
-            assistantContent =
-              typeof event.message === "string"
-                ? event.message
-                : "Failed to reach the legal agent man.";
+            assistantContent = String(event.content || "Failed to reach PPT V3.");
             updateAssistant((message) => ({
               ...message,
               content: assistantContent,
               streaming: false,
             }));
           }
-        }
-      }
-
-      const trailing = buffer.trim();
-      if (trailing) {
-        try {
-          const event = JSON.parse(trailing);
-          if (event.type === "final_answer" || event.type === "final") {
-            setActivity(null);
-            const finalText = getEventText(event);
-            const preferredFinalText =
-              normalizeStreamText(finalText).trim() ||
-              assistantContent.trim();
-            assistantContent = preferredFinalText;
-            updateAssistant((message) => ({
-              ...message,
-              content: assistantContent || "No response returned.",
-              streaming: false,
-            }));
-          }
-        } catch {
-          // Ignore partial trailing data.
         }
       }
     } finally {
@@ -752,10 +655,11 @@ export function ChatShell() {
   }
 
 
+
   async function callPptV2Agent({
     content,
     pendingAssistantId,
-  }: LegalAgentRequestPayload) {
+  }: AgentRequestPayload) {
     const configuredModel =
       process.env.NEXT_PUBLIC_PPT_MODEL ??
       process.env.NEXT_PUBLIC_PPT_V2_MODEL ??
@@ -969,10 +873,15 @@ export function ChatShell() {
     try {
       const params = new URLSearchParams();
       if (typeof version === "number") params.set("version", String(version));
-      if (path) params.set("path", path);
+      if (path && path !== "deck_v3") params.set("path", path);
       const query = params.toString() ? `?${params.toString()}` : "";
+      // v3 decks live at their own endpoint (marked by the sentinel path "deck_v3")
+      const endpoint =
+        path === "deck_v3"
+          ? `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/deck/v3/download/${chatIdForFile}`
+          : `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/download/${chatIdForFile}${query}`;
       const res = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL}/ppt_generator/download/${chatIdForFile}${query}`,
+        endpoint,
         {
           headers: {
             Authorization: `Bearer ${process.env.NEXT_PUBLIC_AI_API_TOKEN ?? ""}`,
@@ -1025,7 +934,7 @@ export function ChatShell() {
             attachments,
             pendingAssistantId,
           })
-          : await callLegalAgent({
+          : await callPptV3Agent({
             content,
             attachments,
             pendingAssistantId,
@@ -1049,7 +958,7 @@ export function ChatShell() {
           ? error.message
           : selectedAgent === "ppt_v2"
             ? "Failed to reach PPT V2."
-            : "Failed to reach the legal agent.";
+            : "Failed to reach the PPT agent.";
 
       if (error instanceof DOMException && error.name === "AbortError") {
         return;
